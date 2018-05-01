@@ -417,31 +417,12 @@ class HQNAgent:
 		self.metacontroller.writer.add_graph(tf.get_default_graph())
 		self.writer = tf.summary.FileWriter('./logs_hdqn_{0}'.format(controller_network_type))
 
-	def env_preprocess(self, state):
-		# state to one_hot
-		vector = np.zeros(self.state_shape)
-		vector[0, state] = 1.0
-		return vector
-
-	#return np.expand_dims(vector, axis=0)
-
 	def goal_preprocess(self, goal):
 		#print self.goal_shape
 		# goal to one_hot
 		vector = np.zeros(self.goal_shape)
 		vector[0, goal] = 1.0
 		return vector
-
-	#return np.expand_dims(vector, axis=0)
-
-	#compute the intrinsic reward achieved
-	@staticmethod
-	def get_intrinsic_reward(goal, state):
-		return 1.0 if goal == state else 0.0
-
-	@staticmethod
-	def goal_reached(goal, state):
-		return goal == state
 
 	def fit(self, env, eval_env, num_episodes, eval_num_episodes, reset_env_fit_logs):
 		"""Fit your model to the provided environment.
@@ -460,29 +441,24 @@ class HQNAgent:
 
 			#get initial state
 			state = env.reset()
-			assert state is not None
-			proc_state = self.env_preprocess(state)
-			assert proc_state is not None
-
-			#print 'Burnin episode: {0}'.format(episode_idx)
 
 			if DEBUG:
 				print('Burnin New Episode {0}'.format(episode_idx))
-				print('Initial State {0}'.format(proc_state))
+				print('Initial State {0}'.format(state))
 
 			#select next goal
 			goal = self.metacontroller.select(self.metacontroller.burnin_policy)
-			assert goal is not None
 			proc_goal = self.goal_preprocess(goal)
-			assert proc_goal is not None
 
 			#new episode, completing the goal
 			while True:
 
 				#the first state of the new goal
-				proc_state0 = proc_state
+				state0 = state
 				#the total environmental reward achieved by setting this goal
+				intrinsic_reward = 0
 				extrinsic_reward = 0
+
 
 				#new goal
 				if DEBUG:
@@ -493,48 +469,45 @@ class HQNAgent:
 
 					#select next action given the current goal
 					action = self.controller.select(self.controller.burnin_policy)
-					assert action is not None
 
 					if DEBUG:
 						print('Next action {0}'.format(action))
 
 					#apply the action to the environment, get reward and nextstate
-					next_state, reward, is_terminal = env.step(action)
-					assert next_state is not None
-					proc_next_state = self.env_preprocess(next_state)
-					assert proc_next_state is not None
+					next_state, in_reward, is_goal_completed, is_goal_over, is_eps_completed, is_eps_over = env.step(
+						action)
 
 					#compute the internal and external reward
-					extrinsic_reward += reward
-					intrinsic_reward = self.get_intrinsic_reward(goal, next_state)
+					intrinsic_reward += in_reward
+					extrinsic_reward += env.get_extrinsic_reward()
 					if DEBUG:
 						print(
 							'Next state {0} {1} : Goal {2} {3} Intrinsic Reward {4} Extrinsic Reward {5} Action{6}'.format(
-								proc_next_state, next_state, proc_goal, goal, intrinsic_reward, extrinsic_reward,
+								next_state, next_state, proc_goal, goal, intrinsic_reward, extrinsic_reward,
 								action))
 
 					#store the experience in the controller's memory
 					#self.controller.num_samples+=1
-					self.controller.memory.append([proc_state, proc_goal],
+					self.controller.memory.append([state, proc_goal],
 					                              action,
 					                              intrinsic_reward,
-					                              [proc_next_state, proc_goal],
-					                              is_terminal)
+					                              [next_state, proc_goal],
+					                              is_goal_completed or is_goal_over)
 
-					proc_state = proc_next_state
-					if is_terminal or self.goal_reached(next_state, goal):
+					state = next_state
+					if is_goal_completed or is_goal_over:
 						if DEBUG:
 							print('New goal and maybe new episode')
 						break
 
 				#store the experience in the metacontroller's memory
 				#self.metacontroller.num_samples+=1
-				self.metacontroller.memory.append([proc_state0],
+				self.metacontroller.memory.append([state0],
 				                                  goal,
 				                                  extrinsic_reward,
-				                                  [proc_next_state],
-				                                  is_terminal)
-				if is_terminal:
+				                                  [next_state],
+				                                  is_eps_completed or is_eps_over)
+				if is_eps_over or is_eps_completed:
 					#start new episode
 					if DEBUG:
 						print('Start new episode {0}'.format(episode_idx))
@@ -546,12 +519,12 @@ class HQNAgent:
 
 					goal = self.metacontroller.select(self.metacontroller.burnin_policy)
 					proc_goal = self.goal_preprocess(goal)
-					assert proc_goal is not None
 
 		#start training the networks
-		env.reset_fit_logs()
-		total_extrinsic_reward = 0
-		total_intrinsic_reward = 0
+		# TODO: log num of visits
+		# env.reset_fit_logs()
+
+
 		goal_num_samples = np.zeros(self.num_goals)
 
 		for self.num_train_episodes in range(num_episodes):
@@ -565,27 +538,22 @@ class HQNAgent:
 
 			#get initial state
 			state = env.reset()
-			assert state is not None
-			proc_state = self.env_preprocess(state)
-			assert proc_state is not None
 
 			if DEBUG:
 				print('Training New Episode {0}'.format(episode_idx))
-			#print 'Initial State {0}'.format(proc_state)
 
 			#select next goal
-			#print 'Select goal {0}'.format(self.metacontroller.num_samples)
-			goal = self.metacontroller.select(policy=self.metacontroller.training_policy, state=[proc_state],
+			goal = self.metacontroller.select(policy=self.metacontroller.training_policy, state=[state],
 			                                  num_update=self.metacontroller.num_samples)
 
 			assert goal is not None
 			proc_goal = self.goal_preprocess(goal)
-			assert proc_goal is not None
 
 			#new episode
 			while True:
 
-				proc_state0 = proc_state
+				state0 = state
+				intrinsic_reward = 0
 				extrinsic_reward = 0
 
 				#new goal
@@ -596,35 +564,32 @@ class HQNAgent:
 				while True:
 
 					#select next action given the current goal
-					#print 'Select action for goal {0} {1}'.format(goal,goal_num_samples[goal])
 					action = self.controller.select(policy=self.controller.training_policy,
-					                                state=[proc_state, proc_goal], num_update=goal_num_samples[goal])
+					                                state=[state, proc_goal], num_update=goal_num_samples[goal])
 
 					#apply the action to the environment, get reward and nextstate
-					next_state, reward, is_terminal = env.step(action)
+					next_state, in_reward, is_goal_completed,is_goal_over,is_eps_completed,is_eps_over = env.step(
+						action)
 					assert next_state is not None
-					proc_next_state = self.env_preprocess(next_state)
-					assert proc_next_state is not None
 
 					#compute the internal and external reward
-					extrinsic_reward += reward
-					total_extrinsic_reward += reward
-					intrinsic_reward = self.get_intrinsic_reward(goal, next_state)
+					intrinsic_reward += in_reward
+					extrinsic_reward += env.get_extrinsic_reward()
+
 					if DEBUG:
 						print(
 							'Next state {0} {1} : Goal {2} {3} Intrinsic Reward {4} Extrinsic Reward {5} Action{6}'.format(
-								proc_next_state, next_state, proc_goal, goal, intrinsic_reward, extrinsic_reward,
+								next_state, next_state, proc_goal, goal, intrinsic_reward, extrinsic_reward,
 								action))
 
-					total_intrinsic_reward += intrinsic_reward
 
 					#store the experience in the controller's memory
 					self.controller.num_samples += 1
-					self.controller.memory.append([proc_state, proc_goal],
+					self.controller.memory.append([state, proc_goal],
 					                              action,
 					                              intrinsic_reward,
-					                              [proc_next_state, proc_goal],
-					                              is_terminal)
+					                              [next_state, proc_goal],
+					                              is_goal_over or is_eps_completed)
 
 					#update the weights of the controller's network
 					self.controller.update_policy(self.writer)
@@ -637,10 +602,6 @@ class HQNAgent:
 					#update the tensorboard training metrics
 					#save_scalar(self.metacontroller.num_updates,'total training extrinsic reward',total_extrinsic_reward,self.metacontroller.writer)
 					#save_scalar(self.controller.num_updates,'total training intrinsic reward',total_intrinsic_reward,self.controller.writer)
-					save_scalar(self.metacontroller.num_updates, 'Total Training Extrinsic Reward',
-					            total_extrinsic_reward, self.writer)
-					save_scalar(self.controller.num_updates, 'Total Training Intrinsic Reward', total_intrinsic_reward,
-					            self.writer)
 
 					#check if it's time to store the controller's model
 					if self.controller.num_updates > 0 and self.controller.num_updates % SAVE_FREQ == 0:
@@ -649,31 +610,29 @@ class HQNAgent:
 					if self.metacontroller.num_updates > 0 and self.controller.num_updates % SAVE_FREQ == 0:
 						self.controller.save_model()
 
-					proc_state = proc_next_state
-					if is_terminal or self.goal_reached(next_state, goal):
+					state = next_state
+					if is_goal_over or is_goal_completed:
 						goal_num_samples[goal] += 1
 						if DEBUG:
 							print('New goal and maybe new episode')
-
 						break
 
 				#store the experience in the metacontroller's memory
 				self.metacontroller.num_samples += 1
-				self.metacontroller.memory.append([proc_state0],
+				self.metacontroller.memory.append([state0],
 				                                  goal,
 				                                  extrinsic_reward,
-				                                  [proc_next_state],
-				                                  is_terminal)
+				                                  [next_state],
+				                                  is_eps_completed or is_eps_over)
 
-				if is_terminal:
+				if is_eps_over or is_eps_completed:
 					#start new episode
 					if (self.num_train_episodes + 1) % reset_env_fit_logs == 0:
 						for state_idx in range(env.num_states):
 							save_scalar(self.num_train_episodes, 'Visit Counts for state {0}'.format(state_idx),
 							            env.visit_counts[state_idx], self.writer)
+						# TODO: reset_fit_log
 						env.reset_fit_logs()
-					#print 'Visit counts for each state '
-					#print env.visit_counts
 
 					if DEBUG:
 						print('Start new episode {0}'.format(self.num_train_episodes))
@@ -682,7 +641,7 @@ class HQNAgent:
 					#select next goal
 					if DEBUG:
 						print('Start new goal within the same episode')
-					goal = self.metacontroller.select(policy=self.metacontroller.training_policy, state=[proc_state],
+					goal = self.metacontroller.select(policy=self.metacontroller.training_policy, state=[state],
 					                                  num_update=goal_num_samples[goal])
 					proc_goal = self.goal_preprocess(goal)
 
@@ -706,67 +665,55 @@ class HQNAgent:
 			print('Total reward {0}'.format(total_reward))
 			state = env.reset()
 			assert state is not None
-			proc_state = self.env_preprocess(state)
-			assert proc_state is not None
 
 			if DEBUG:
 				print('Evaluating New Episode {0}'.format(episode_idx))
-				print('Initial State {0}'.format(proc_state))
+				print('Initial State {0}'.format(state))
 
-			#print 'Initial State {0}'.format(proc_state)
 
 			#select next goal
-			goal = self.metacontroller.select(policy=self.metacontroller.testing_policy, state=[proc_state])
-			#goal=6
+			goal = self.metacontroller.select(policy=self.metacontroller.testing_policy, state=[state])
 			proc_goal = self.goal_preprocess(goal)
 
 			#new episode
 			while True:
 
-				state_0 = proc_state
+				state_0 = state
 
 				if DEBUG:
 					print('Next goal {0}'.format(proc_goal))
 				#new goal
 				while True:
 					action = self.controller.select(policy=self.controller.testing_policy,
-					                                state=[proc_state, proc_goal])
+					                                state=[state, proc_goal])
 
 					#apply the action to the environment, get reward and nextstate
-					next_state, reward, is_terminal = env.step(action)
+					next_state, in_reward, is_goal_completed, is_goal_over,is_eps_completed,is_eps_over = env.step(
+						action)
 					assert next_state is not None
-					proc_next_state = self.env_preprocess(next_state)
-					assert proc_next_state is not None
 
-					#print 'Previous State {0} Next state {1} : Goal {2} Extrinsic Reward {3} Action {4}'.format(proc_state,proc_next_state, proc_goal,reward, action)
 					if DEBUG:
-						#print '
-						#print 'Reward {0}'.format(reward)
-						#print 'Action {0}'.format(action)
-						#print 'Previous State {0} Next state {1} : Goal {2} Extrinsic Reward {3} Action {4}'.format(proc_state,proc_next_state, proc_goal,action, reward)
 						print('Previous State {0} Next state {1} : Goal {2} Extrinsic Reward {3} Action {4}'.format(
-							proc_state, proc_next_state, proc_goal, reward, action))
+							state, next_state, proc_goal, in_reward, action))
 
 					#compute the internal and external reward
 
-					total_reward += reward
+					total_reward += env.get_extrinsic_reward()
 
 					episode_length += 1
 
-					if is_terminal or self.goal_reached(next_state, goal):
+					if is_goal_over or is_goal_completed:
 						break
 
 					state = next_state
-					proc_state = proc_next_state
 
-				if is_terminal:
+				if is_eps_over or is_eps_completed:
 					#start new episode
 					break
 				else:
 					#select next goal
-					goal = self.metacontroller.select(policy=self.metacontroller.testing_policy, state=[proc_state])
+					goal = self.metacontroller.select(policy=self.metacontroller.testing_policy, state=[state])
 					proc_goal = self.goal_preprocess(goal)
-				#goal=0
 
 		#update the tensorboard logistics
 		#save_scalar(self.controller.num_updates,'Total Testing Reward',total_reward,self.controller.writer)
